@@ -14,8 +14,7 @@ defcustom → auth-source → env (`ALPACA_API_PAPER_KEY`/`_SECRET` when
 - This package is READ-ONLY by design in v1: no order placement exists.
   Do not add order submission without the owner's explicit direction.
 - Zero references to the owner's dotfiles are allowed here — the repo
-  must remain publishable as-is. The canonical development copy is
-  mirrored in the owner's dotfiles under
-  `config/terminal/emacs/custom-plugins/alpaca-broker/`; substantive
-  changes should land in both.
+  must remain publishable as-is. THIS repo is canonical; the owner's
+  dotfiles emacs config imports it via load-path and carries no copy of
+  the source. All changes land here.
 - Authorized: david, swe.
