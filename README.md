@@ -25,7 +25,7 @@ calls); JSON is parsed with the built-in `json-parse-buffer`. Requires Emacs
 
 ```elisp
 (straight-use-package
- '(alpaca-broker :type git :host github :repo "your-username/alpaca-broker.el"
+ '(alpaca-broker :type git :host github :repo "davidawad/alpaca-broker.el"
                  :files ("alpaca-broker.el" "alpaca-broker-data.el"
                          "alpaca-broker-trading.el")))
 ```
@@ -34,7 +34,7 @@ calls); JSON is parsed with the built-in `json-parse-buffer`. Requires Emacs
 
 ```elisp
 (use-package alpaca-broker
-  :straight (:type git :host github :repo "your-username/alpaca-broker.el"
+  :straight (:type git :host github :repo "davidawad/alpaca-broker.el"
              :files ("alpaca-broker.el" "alpaca-broker-data.el"
                      "alpaca-broker-trading.el"))
   :commands (alpaca-broker-show-quote))

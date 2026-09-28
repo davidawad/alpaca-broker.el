@@ -1,14 +1,15 @@
 ;;; alpaca-broker.el --- Pure-Elisp client for the Alpaca Markets API -*- lexical-binding: t; -*-
 
-;; Author: Your Name <you@example.com>
-;; Maintainer: Your Name <you@example.com>
+;; Author: David Awad <me@davidaw.ad>
+;; Maintainer: David Awad <me@davidaw.ad>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: comm, tools
-;; URL: https://github.com/your-username/alpaca-broker.el
+;; URL: https://github.com/davidawad/alpaca-broker.el
 
 ;; This file is not part of GNU Emacs.
 
+;; SPDX-License-Identifier: MIT
 ;; MIT License; see LICENSE in this package's directory for the full text.
 
 ;;; Commentary:

@@ -1,10 +1,11 @@
 ;;; alpaca-broker-data.el --- Market-data endpoints for alpaca-broker.el -*- lexical-binding: t; -*-
 
-;; Author: Your Name <you@example.com>
+;; Author: David Awad <me@davidaw.ad>
 ;; Keywords: comm, tools
 
 ;; This file is not part of GNU Emacs.
 
+;; SPDX-License-Identifier: MIT
 ;; MIT License; see LICENSE in this package's directory for the full text.
 
 ;;; Commentary:
