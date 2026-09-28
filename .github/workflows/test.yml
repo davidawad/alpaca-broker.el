@@ -30,6 +30,7 @@ jobs:
 
       - name: Run tests
         run: |
+          set -- test/*.el
           emacs -Q --batch -L . -L test \
-            -l test/alpaca-broker-test.el \
+            $(for f in "$@"; do printf ' -l %s' "$f"; done) \
             -f ert-run-tests-batch-and-exit
