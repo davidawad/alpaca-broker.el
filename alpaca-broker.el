@@ -2,7 +2,7 @@
 
 ;; Author: David Awad <me@davidaw.ad>
 ;; Maintainer: David Awad <me@davidaw.ad>
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: comm, tools
 ;; URL: https://github.com/davidawad/alpaca-broker.el
@@ -82,6 +82,18 @@ and `ALPACA_API_PAPER_SECRET' when non-nil, else `ALPACA_API_KEY' and
 `ALPACA_API_SECRET'.  Market data (`https://data.alpaca.markets') is
 unaffected -- Alpaca serves the same data API regardless of paper vs
 live."
+  :type 'boolean
+  :group 'alpaca-broker)
+
+(defcustom alpaca-broker-allow-orders nil
+  "Non-nil to allow order- and position-mutating requests.
+
+Guards every function that places, replaces, or cancels an order,
+closes a position, or exercises/declines an option contract -- see
+`alpaca-broker--require-order-permission'.  Defaults to nil so this
+package never mutates a live or paper account by accident; flip it
+explicitly (and ideally only with `alpaca-broker-paper' also non-nil)
+before calling any order-mutating function."
   :type 'boolean
   :group 'alpaca-broker)
 
@@ -228,6 +240,12 @@ non-nil values."
              (seq-filter #'cdr params)
              "&"))
 
+(defun alpaca-broker--join-symbols (symbols)
+  "Return SYMBOLS as a comma-joined string for a `symbols' query param.
+SYMBOLS is either already a string (returned as-is) or a list of
+strings (joined with commas), e.g. \"AAPL,MSFT\" or (\"AAPL\" \"MSFT\")."
+  (if (stringp symbols) symbols (mapconcat #'identity symbols ",")))
+
 (defun alpaca-broker--url (host path params)
   "Build the full request URL for HOST and PATH.
 Appends PARAMS (see `alpaca-broker--query-string') as a `?'-prefixed
@@ -238,13 +256,28 @@ query string when non-empty."
      (unless (string-empty-p query)
        (concat "?" query)))))
 
-(defun alpaca-broker--headers ()
+(defun alpaca-broker--headers (&optional has-body)
   "Return the `url-request-extra-headers' alist for an authenticated request.
-Resolves credentials via `alpaca-broker--credentials'."
+Resolves credentials via `alpaca-broker--credentials'.  Adds a JSON
+`Content-Type' header when HAS-BODY is non-nil."
   (let ((credentials (alpaca-broker--credentials)))
     `(("APCA-API-KEY-ID" . ,(car credentials))
       ("APCA-API-SECRET-KEY" . ,(cdr credentials))
-      ("Accept" . "application/json"))))
+      ("Accept" . "application/json")
+      ,@(when has-body '(("Content-Type" . "application/json"))))))
+
+;; -- order-mutation safety gate --
+
+(defun alpaca-broker--require-order-permission (fn-name)
+  "Signal a `user-error' unless `alpaca-broker-allow-orders' is non-nil.
+FN-NAME (a symbol or string) names the calling function, for the error
+message.  Every function that places, replaces, or cancels an order,
+closes a position, or exercises/declines an option contract must call
+this before issuing its request."
+  (unless alpaca-broker-allow-orders
+    (user-error
+     "%s: order-mutating requests are disabled; set `alpaca-broker-allow-orders' to non-nil to enable them"
+     fn-name)))
 
 ;; -- JSON/error boundary --
 
@@ -292,17 +325,40 @@ BUFFER before returning."
             (alpaca-broker--signal-http-error status))))
     (kill-buffer buffer)))
 
+(defun alpaca-broker--handle-response-buffer-binary (buffer)
+  "Return BUFFER's raw body as a unibyte string, e.g. a PNG logo image.
+Like `alpaca-broker--handle-response-buffer', but returns the response
+body verbatim instead of parsing it as JSON.  Signals
+`alpaca-broker-error' on a non-2xx status.  Kills BUFFER before
+returning."
+  (unwind-protect
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (let ((status url-http-response-status))
+          (re-search-forward "\r?\n\r?\n" nil 'move)
+          (if (and status (< status 300))
+              (buffer-substring (point) (point-max))
+            (alpaca-broker--signal-http-error status))))
+    (kill-buffer buffer)))
+
 ;; -- request layer --
 
-(defun alpaca-broker--request-sync (host method path &optional params)
+(defun alpaca-broker--json-encode (body)
+  "Return BODY (an alist, plist, or list) JSON-encoded as a string."
+  (let ((json-false :false) (json-null nil))
+    (json-encode body)))
+
+(defun alpaca-broker--request-sync (host method path &optional params body)
   "Issue a synchronous, authenticated request and return its JSON body.
 Sends a METHOD request to HOST + PATH with query PARAMS, blocking up
-to `alpaca-broker-timeout' seconds.  Returns the parsed JSON alist, or
-nil for an empty body.  Signals `alpaca-broker-error' on a non-2xx
-response, transport failure, or timeout -- never a raw `url.el'
-condition."
+to `alpaca-broker-timeout' seconds.  BODY, when non-nil, is JSON-encoded
+and sent as the request body with a `Content-Type: application/json'
+header.  Returns the parsed JSON alist, or nil for an empty body.
+Signals `alpaca-broker-error' on a non-2xx response, transport
+failure, or timeout -- never a raw `url.el' condition."
   (let* ((url-request-method method)
-         (url-request-extra-headers (alpaca-broker--headers))
+         (url-request-extra-headers (alpaca-broker--headers body))
+         (url-request-data (and body (alpaca-broker--json-encode body)))
          (url (alpaca-broker--url host path params))
          (buffer
           (url-retrieve-synchronously url t t alpaca-broker-timeout)))
@@ -314,16 +370,38 @@ condition."
         (format "request failed or timed out: %s %s" method url))))
     (alpaca-broker--handle-response-buffer buffer)))
 
-(defun alpaca-broker--request-async (host method path params callback)
-  "Issue an asynchronous, authenticated request, calling CALLBACK.
-Sends a METHOD request to HOST + PATH with query PARAMS.  On success,
-calls CALLBACK with one argument, the parsed JSON alist (or nil for an
-empty body).  On an HTTP error or transport failure, signals
-`alpaca-broker-error' from within the response callback rather than
-letting a raw `url.el' condition through -- wrap CALLBACK's own body
-in `condition-case' if the caller needs to react to that itself."
+(defun alpaca-broker--request-sync-binary (host method path &optional params)
+  "Issue a synchronous, authenticated request and return its raw body.
+Sends a METHOD request to HOST + PATH with query PARAMS.  Like
+`alpaca-broker--request-sync', but returns the response body verbatim
+\(a unibyte string) instead of parsing it as JSON -- for endpoints that
+return a binary payload, e.g. a PNG logo image."
   (let* ((url-request-method method)
          (url-request-extra-headers (alpaca-broker--headers))
+         (url (alpaca-broker--url host path params))
+         (buffer
+          (url-retrieve-synchronously url t t alpaca-broker-timeout)))
+    (unless buffer
+      (signal
+       'alpaca-broker-error
+       (list
+        nil
+        (format "request failed or timed out: %s %s" method url))))
+    (alpaca-broker--handle-response-buffer-binary buffer)))
+
+(defun alpaca-broker--request-async (host method path params body callback)
+  "Issue an asynchronous, authenticated request, calling CALLBACK.
+Sends a METHOD request to HOST + PATH with query PARAMS.  BODY, when
+non-nil, is JSON-encoded and sent as the request body with a
+`Content-Type: application/json' header.  On success, calls CALLBACK
+with one argument, the parsed JSON alist (or nil for an empty body).
+On an HTTP error or transport failure, signals `alpaca-broker-error'
+from within the response callback rather than letting a raw `url.el'
+condition through -- wrap CALLBACK's own body in `condition-case' if
+the caller needs to react to that itself."
+  (let* ((url-request-method method)
+         (url-request-extra-headers (alpaca-broker--headers body))
+         (url-request-data (and body (alpaca-broker--json-encode body)))
          (url (alpaca-broker--url host path params)))
     (url-retrieve
      url
@@ -334,6 +412,69 @@ in `condition-case' if the caller needs to react to that itself."
                   (alpaca-broker--handle-response-buffer
                    (current-buffer)))))
      nil t t)))
+
+;; -- pagination --
+
+(defun alpaca-broker--fetch-all-pages-sync (fetch-page-fn merge-fn)
+  "Fetch every page of a `next_page_token'-paginated endpoint.
+FETCH-PAGE-FN is called with one argument, a page token (nil for the
+first page), and must return the raw parsed JSON alist for that page,
+including a `next_page_token' key when more pages remain.  MERGE-FN is
+called with two arguments, an accumulator (initially nil) and one
+page's raw alist, and must return the updated accumulator -- e.g. by
+appending that page's items to it.  Returns the final accumulator once
+a page's `next_page_token' is nil or `:false'.
+
+Every `alpaca-broker-FOO' fetcher that exposes a single raw page also
+has an `alpaca-broker-FOO-all-sync' sibling built on this helper."
+  (let (acc (token nil) (more t))
+    (while more
+      (let ((page (funcall fetch-page-fn token)))
+        (setq acc (funcall merge-fn acc page))
+        (setq token (alist-get 'next_page_token page))
+        (setq more (and token (not (eq token :false))))))
+    acc))
+
+(defun alpaca-broker--merge-keyed-list-pages (acc page key)
+  "Merge PAGE's KEY-keyed symbol/id->list map into ACC (same shape).
+MERGE-FN for `alpaca-broker--fetch-all-pages-sync' on endpoints whose
+response is an object keyed by symbol, contract, or ISIN, mapping to a
+list of items per page -- stock/option/crypto historical bars, trades,
+quotes, and auctions.  Returns the updated alist."
+  (let ((page-map (alist-get key page)))
+    (dolist (entry page-map)
+      (let* ((k (car entry))
+             (items (cdr entry))
+             (existing (assq k acc)))
+        (if existing
+            (setcdr existing (append (cdr existing) items))
+          (push (cons k items) acc))))
+    acc))
+
+(defun alpaca-broker--merge-keyed-object-pages (acc page key)
+  "Merge PAGE's KEY-keyed symbol/contract->object map into ACC.
+Unlike `alpaca-broker--merge-keyed-list-pages', each entry's value is a
+single object, not a list; a later page's entry for the same key
+replaces an earlier one.  MERGE-FN for `alpaca-broker--fetch-all-pages-sync'
+on endpoints like the option chain and option/crypto snapshots."
+  (let ((page-map (alist-get key page)))
+    (dolist (entry page-map)
+      (setf (alist-get (car entry) acc) (cdr entry)))
+    acc))
+
+(defun alpaca-broker--bars-params (start end limit)
+  "Build the query-params alist shared by the single-symbol bars fetchers.
+START and END are each an optional ISO-8601 string; LIMIT is an
+optional integer, converted to a string."
+  `(("start" . ,start)
+    ("end" . ,end)
+    ("limit" . ,(and limit (number-to-string limit)))))
+
+(defun alpaca-broker--merge-flat-list-pages (acc page key)
+  "Merge PAGE's KEY list onto ACC (a plain list), preserving order.
+MERGE-FN for `alpaca-broker--fetch-all-pages-sync' on endpoints whose
+response is a flat list under KEY, e.g. news articles or orders."
+  (append acc (alist-get key page)))
 
 (provide 'alpaca-broker)
 ;;; alpaca-broker.el ends here

@@ -1,16 +1,17 @@
-;;; alpaca-broker-test.el --- Tests for alpaca-broker.el -*- lexical-binding: t; -*-
+;;; alpaca-broker-test.el --- Tests for alpaca-broker.el core -*- lexical-binding: t; -*-
 
 ;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
 
-;; ERT tests for alpaca-broker.el/alpaca-broker-data.el/
-;; alpaca-broker-trading.el.  Mocks at the
-;; `url-retrieve'/`url-retrieve-synchronously' boundary (never makes a
-;; real network call), covering: request construction (headers, paper
-;; vs live host selection, query params), response parsing on canned
-;; JSON, error signaling on 4xx/5xx, and credential precedence
-;; (defcustom > auth-source > env).
+;; ERT tests for alpaca-broker.el's core: credential resolution,
+;; URL/query-string construction, the request layer (headers, JSON
+;; body encoding, response parsing, error signaling), the order-safety
+;; gate, and the pagination helpers.  Every per-endpoint request-shape
+;; test lives in the sibling `alpaca-broker-*-test.el' files instead --
+;; this file only exercises the shared plumbing those files build on.
+;; Mocks at the `url-retrieve'/`url-retrieve-synchronously' boundary
+;; (never makes a real network call).
 ;;
 ;; Run from the repo root:
 ;;   emacs -Q --batch -L . -L test -l test/alpaca-broker-test.el \
@@ -18,39 +19,7 @@
 
 ;;; Code:
 
-(require 'ert)
-(require 'cl-lib)
-(require 'url-http)
-(add-to-list 'load-path
-             (file-name-directory (or load-file-name buffer-file-name)))
-(add-to-list
- 'load-path
- (file-name-directory
-  (directory-file-name
-   (file-name-directory (or load-file-name buffer-file-name)))))
-(require 'alpaca-broker)
-(require 'alpaca-broker-data)
-(require 'alpaca-broker-trading)
-
-(defun alpaca-broker-test--fake-response-buffer (status body)
-  "Build a fake `url-retrieve'-style response buffer reporting STATUS
-with BODY as its (already-past-the-headers) content."
-  (let ((buf (generate-new-buffer " *alpaca-broker-test*")))
-    (with-current-buffer buf
-      (insert
-       (format
-        "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\n\r\n%s"
-        status body))
-      (set (make-local-variable 'url-http-response-status) status))
-    buf))
-
-(defmacro alpaca-broker-test--with-credentials (key secret &rest body)
-  "Run BODY with `alpaca-broker-api-key'/`alpaca-broker-api-secret'
-bound to KEY/SECRET, so request-construction tests never touch
-`auth-source' or the environment."
-  (declare (indent 2))
-  `(let ((alpaca-broker-api-key ,key) (alpaca-broker-api-secret ,secret))
-     ,@body))
+(require 'alpaca-broker-test-helpers)
 
 ;; -- credential resolution --
 
@@ -167,6 +136,12 @@ function rather than a raw string; must be `funcall'ed."
                                        nil)
                   "https://data.alpaca.markets/v2/stocks/AAPL")))
 
+(ert-deftest alpaca-broker-join-symbols-passes-through-a-string ()
+  (should (equal (alpaca-broker--join-symbols "AAPL,MSFT") "AAPL,MSFT")))
+
+(ert-deftest alpaca-broker-join-symbols-joins-a-list-with-commas ()
+  (should (equal (alpaca-broker--join-symbols '("AAPL" "MSFT")) "AAPL,MSFT")))
+
 ;; -- host selection (paper vs live) --
 
 (ert-deftest alpaca-broker-trading-api-root-is-paper-host-by-default ()
@@ -212,9 +187,41 @@ function rather than a raw string; must be `funcall'ed."
            (equal seen-url
                   "https://api.alpaca.markets/v2/orders?status=open"))))))
 
+(ert-deftest alpaca-broker-request-sync-json-encodes-body-and-sets-content-type ()
+  "A non-nil BODY is JSON-encoded onto `url-request-data' and adds a
+JSON `Content-Type' header -- the plumbing every order-mutating and
+watchlist-mutating endpoint relies on."
+  (alpaca-broker-test--with-credentials
+      "k" "s"
+      (let (seen-data seen-headers)
+        (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                   (lambda (&rest _)
+                     (setq seen-data url-request-data
+                           seen-headers url-request-extra-headers)
+                     (alpaca-broker-test--fake-response-buffer 200 "{}"))))
+          (alpaca-broker--request-sync "https://api.alpaca.markets" "POST"
+                                        "/v2/orders" nil
+                                        '(("symbol" . "SPY") ("qty" . "1")))
+          (should (equal (cdr (assoc "Content-Type" seen-headers))
+                          "application/json"))
+          (should (equal (alpaca-broker-test--decode-body seen-data)
+                          '((symbol . "SPY") (qty . "1"))))))))
+
+(ert-deftest alpaca-broker-request-sync-omits-content-type-when-no-body ()
+  (alpaca-broker-test--with-credentials
+      "k" "s"
+      (let (seen-headers)
+        (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                   (lambda (&rest _)
+                     (setq seen-headers url-request-extra-headers)
+                     (alpaca-broker-test--fake-response-buffer 200 "{}"))))
+          (alpaca-broker--request-sync "https://api.alpaca.markets" "GET"
+                                        "/v2/account")
+          (should (null (assoc "Content-Type" seen-headers)))))))
+
 ;; -- response parsing --
 
-(ert-deftest alpaca-broker-request-sync-parses-canned-quote-json ()
+(ert-deftest alpaca-broker-request-sync-parses-canned-object-json ()
   (alpaca-broker-test--with-credentials
       "k" "s"
       (cl-letf (((symbol-function 'url-retrieve-synchronously)
@@ -222,10 +229,27 @@ function rather than a raw string; must be `funcall'ed."
                    (alpaca-broker-test--fake-response-buffer
                     200
                     "{\"symbol\":\"AAPL\",\"quote\":{\"bp\":150.1,\"ap\":150.3}}"))))
-        (let ((result (alpaca-broker-latest-quote-sync "AAPL")))
+        (let ((result (alpaca-broker--request-sync
+                       "https://data.alpaca.markets" "GET"
+                       "/v2/stocks/AAPL/quotes/latest")))
           (should (equal (alist-get 'symbol result) "AAPL"))
           (should (equal (alist-get 'bp (alist-get 'quote result)) 150.1))
           (should (equal (alist-get 'ap (alist-get 'quote result)) 150.3))))))
+
+(ert-deftest alpaca-broker-request-sync-parses-canned-array-json ()
+  (alpaca-broker-test--with-credentials
+      "k" "s"
+      (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                 (lambda (&rest _)
+                   (alpaca-broker-test--fake-response-buffer
+                    200
+                    "[{\"symbol\":\"AAPL\",\"qty\":\"10\"},{\"symbol\":\"MSFT\",\"qty\":\"5\"}]"))))
+        (let ((result (alpaca-broker--request-sync
+                       "https://paper-api.alpaca.markets" "GET"
+                       "/v2/positions")))
+          (should (= (length result) 2))
+          (should (equal (alist-get 'symbol (car result)) "AAPL"))
+          (should (equal (alist-get 'symbol (cadr result)) "MSFT"))))))
 
 (ert-deftest alpaca-broker-request-sync-empty-body-returns-nil ()
   (alpaca-broker-test--with-credentials
@@ -237,41 +261,19 @@ function rather than a raw string; must be `funcall'ed."
                        "https://data.alpaca.markets" "GET"
                        "/v2/stocks/AAPL/quotes/latest"))))))
 
-(ert-deftest alpaca-broker-crypto-latest-quote-sync-unwraps-symbol-map ()
+(ert-deftest alpaca-broker-request-sync-binary-returns-raw-body ()
+  "Returns the response body verbatim -- not JSON-parsed -- for a
+binary-payload endpoint like the logo fetcher."
   (alpaca-broker-test--with-credentials
       "k" "s"
       (cl-letf (((symbol-function 'url-retrieve-synchronously)
                  (lambda (&rest _)
                    (alpaca-broker-test--fake-response-buffer
-                    200
-                    "{\"quotes\":{\"BTC/USD\":{\"bp\":50000,\"ap\":50010}}}"))))
-        (let ((result (alpaca-broker-crypto-latest-quote-sync "BTC/USD")))
-          (should (equal (alist-get 'bp result) 50000))
-          (should (equal (alist-get 'ap result) 50010))))))
-
-(ert-deftest alpaca-broker-positions-sync-parses-array-response ()
-  (alpaca-broker-test--with-credentials
-      "k" "s"
-      (cl-letf (((symbol-function 'url-retrieve-synchronously)
-                 (lambda (&rest _)
-                   (alpaca-broker-test--fake-response-buffer
-                    200
-                    "[{\"symbol\":\"AAPL\",\"qty\":\"10\"},{\"symbol\":\"MSFT\",\"qty\":\"5\"}]"))))
-        (let ((result (alpaca-broker-positions-sync)))
-          (should (= (length result) 2))
-          (should (equal (alist-get 'symbol (car result)) "AAPL"))
-          (should (equal (alist-get 'symbol (cadr result)) "MSFT"))))))
-
-(ert-deftest alpaca-broker-account-sync-parses-object-response ()
-  (alpaca-broker-test--with-credentials
-      "k" "s"
-      (cl-letf (((symbol-function 'url-retrieve-synchronously)
-                 (lambda (&rest _)
-                   (alpaca-broker-test--fake-response-buffer
-                    200 "{\"id\":\"acc-1\",\"cash\":\"1000.00\"}"))))
-        (let ((result (alpaca-broker-account-sync)))
-          (should (equal (alist-get 'id result) "acc-1"))
-          (should (equal (alist-get 'cash result) "1000.00"))))))
+                    200 "FAKE-PNG-BYTES-NOT-JSON"))))
+        (should (equal (alpaca-broker--request-sync-binary
+                        "https://data.alpaca.markets" "GET"
+                        "/v1beta1/logos/AAPL")
+                       "FAKE-PNG-BYTES-NOT-JSON")))))
 
 ;; -- error signaling --
 
@@ -331,9 +333,26 @@ error."
                        (with-current-buffer buf
                          (funcall callback nil))))))
           (alpaca-broker--request-async
-           "https://data.alpaca.markets" "GET" "/v2/account" nil
+           "https://data.alpaca.markets" "GET" "/v2/account" nil nil
            (lambda (result) (setq captured result)))
           (should (equal (alist-get 'ok captured) t))))))
+
+(ert-deftest alpaca-broker-request-async-json-encodes-body ()
+  (alpaca-broker-test--with-credentials
+      "k" "s"
+      (let (seen-data)
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (_url callback &rest _)
+                     (setq seen-data url-request-data)
+                     (let ((buf (alpaca-broker-test--fake-response-buffer
+                                 200 "{}")))
+                       (with-current-buffer buf
+                         (funcall callback nil))))))
+          (alpaca-broker--request-async
+           "https://api.alpaca.markets" "POST" "/v2/orders" nil
+           '(("symbol" . "SPY")) (lambda (_result) nil))
+          (should (equal (alpaca-broker-test--decode-body seen-data)
+                          '((symbol . "SPY"))))))))
 
 (ert-deftest alpaca-broker-request-async-signals-on-error-status ()
   (alpaca-broker-test--with-credentials
@@ -343,25 +362,70 @@ error."
                    (funcall callback (list :error '(error http 500))))))
         (should-error
          (alpaca-broker--request-async
-          "https://data.alpaca.markets" "GET" "/v2/account" nil
+          "https://data.alpaca.markets" "GET" "/v2/account" nil nil
           (lambda (_result) nil))
          :type 'alpaca-broker-error))))
 
-;; -- orders params pass-through --
+;; -- order-safety gate --
 
-(ert-deftest alpaca-broker-orders-sync-passes-params-through ()
-  (alpaca-broker-test--with-credentials
-      "k" "s"
-      (let (seen-url)
-        (cl-letf (((symbol-function 'url-retrieve-synchronously)
-                   (lambda (url &rest _)
-                     (setq seen-url url)
-                     (alpaca-broker-test--fake-response-buffer 200 "[]"))))
-          (alpaca-broker-orders-sync '(("status" . "all") ("limit" . "10")))
-          (should
-           (equal seen-url
-                  (concat (alpaca-broker--trading-api-root)
-                          "/v2/orders?status=all&limit=10")))))))
+(ert-deftest alpaca-broker-require-order-permission-errors-when-disallowed ()
+  (let ((alpaca-broker-allow-orders nil))
+    (should-error (alpaca-broker--require-order-permission 'some-fn)
+                  :type 'user-error)))
+
+(ert-deftest alpaca-broker-require-order-permission-allows-when-enabled ()
+  (let ((alpaca-broker-allow-orders t))
+    (should (null (alpaca-broker--require-order-permission 'some-fn)))))
+
+;; -- pagination helpers --
+
+(ert-deftest alpaca-broker-fetch-all-pages-sync-stops-at-nil-token ()
+  (let* ((pages '(((next_page_token . "tok-1") (items . (1 2)))
+                  ((next_page_token . nil) (items . (3)))))
+         (calls 0))
+    (should
+     (equal
+      (alpaca-broker--fetch-all-pages-sync
+       (lambda (_token)
+         (prog1 (nth calls pages) (setq calls (1+ calls))))
+       (lambda (acc page) (append acc (alist-get 'items page))))
+      '(1 2 3)))
+    (should (= calls 2))))
+
+(ert-deftest alpaca-broker-fetch-all-pages-sync-stops-at-false-token ()
+  "Alpaca's JSON `null' decodes to nil already, but guard against a
+literal `:false' token too, since `json-parse-buffer' is configured
+with a `:false-object' of `:false' elsewhere in this package."
+  (let* ((pages '(((next_page_token . :false) (items . (1))))))
+    (should
+     (equal
+      (alpaca-broker--fetch-all-pages-sync
+       (lambda (_token) (car pages))
+       (lambda (acc page) (append acc (alist-get 'items page))))
+      '(1)))))
+
+(ert-deftest alpaca-broker-merge-keyed-list-pages-appends-per-key ()
+  (let ((acc (alpaca-broker--merge-keyed-list-pages
+              nil '((bars . ((AAPL . (1 2))))) 'bars)))
+    (setq acc (alpaca-broker--merge-keyed-list-pages
+               acc '((bars . ((AAPL . (3)) (MSFT . (9))))) 'bars))
+    (should (equal (alist-get 'AAPL acc) '(1 2 3)))
+    (should (equal (alist-get 'MSFT acc) '(9)))))
+
+(ert-deftest alpaca-broker-merge-keyed-object-pages-overwrites-per-key ()
+  (let ((acc (alpaca-broker--merge-keyed-object-pages
+              nil '((snapshots . ((AAPL . old)))) 'snapshots)))
+    (setq acc (alpaca-broker--merge-keyed-object-pages
+               acc '((snapshots . ((AAPL . new) (MSFT . m)))) 'snapshots))
+    (should (equal (alist-get 'AAPL acc) 'new))
+    (should (equal (alist-get 'MSFT acc) 'm))))
+
+(ert-deftest alpaca-broker-merge-flat-list-pages-concatenates-in-order ()
+  (let ((acc (alpaca-broker--merge-flat-list-pages
+              nil '((news . (1 2))) 'news)))
+    (setq acc (alpaca-broker--merge-flat-list-pages
+               acc '((news . (3))) 'news))
+    (should (equal acc '(1 2 3)))))
 
 (provide 'alpaca-broker-test)
 ;;; alpaca-broker-test.el ends here
