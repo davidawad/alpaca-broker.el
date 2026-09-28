@@ -12,17 +12,9 @@
 ;; JSON, error signaling on 4xx/5xx, and credential precedence
 ;; (defcustom > auth-source > env).
 ;;
-;; Run via this repo's config/terminal/emacs/test/run-tests.sh, which
-;; wires this plugin's implementation files and this test file in --
-;; do not hand-assemble an ad-hoc `emacs --batch' invocation (see
-;; docs/solutions/conventions/always-use-run-tests-sh-never-hand-
-;; assemble-ad-hoc-emacs-batch.md in the parent dotfiles repo; that
-;; convention is external to this standalone package).
-;;
-;; Standalone (outside that harness): from this directory,
-;;   emacs -Q --batch -L .. -l ../alpaca-broker.el \
-;;     -l ../alpaca-broker-data.el -l ../alpaca-broker-trading.el \
-;;     -l alpaca-broker-test.el -f ert-run-tests-batch-and-exit
+;; Run from the repo root:
+;;   emacs -Q --batch -L . -L test -l test/alpaca-broker-test.el \
+;;     -f ert-run-tests-batch-and-exit
 
 ;;; Code:
 
