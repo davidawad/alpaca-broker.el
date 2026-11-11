@@ -39,6 +39,9 @@ calls); JSON is parsed with the built-in `json-parse-buffer`. Requires Emacs
 - `alpaca-broker-data-crypto.el` — crypto market data: historical/latest
   bars, trades, quotes, order books, and snapshots.
 - `alpaca-broker-data-news.el` — news articles.
+- `alpaca-broker-model.el` — Alpaca's margin, options-level and
+  account-type rules registered with the sibling `broker-model.el`
+  package (optional; see "broker-model registration" below).
 - `alpaca-broker-data-misc.el` — forex rates, fixed-income latest
   prices/quotes, the stock/crypto screener, symbol logos, and the
   market-data flavor of corporate actions.
@@ -351,3 +354,26 @@ Run with `test/live/run-live-tests.sh`.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## broker-model registration
+
+`alpaca-broker-model.el` registers Alpaca with the sibling
+[broker-model.el](../broker-model.el) package (local-only): account types
+`margin` (Reg T, 2x overnight / 4x intraday), `limited-margin` (1x) and
+`ira` (Broker API, 1x, options up to level 2), as rule cells (value,
+source, confidence) on the regulatory baseline. Alpaca's published rules
+are encoded from captures in `docs/margin/`: the maintenance table,
+concentration rule, buying-power formulas, options levels 0-3 (no
+uncovered options), the universal spread rule, cash-secured put buying
+power, and the intraday margin rule that replaced PDT.
+
+```elisp
+(require 'alpaca-broker-model)   ; needs ../broker-model.el on load-path
+(broker-model-requirement 'alpaca 'margin
+ '(:type vertical :symbol "AAPL" :right call :long-strike 200 :short-strike 190
+   :long-price 10 :short-price 15 :qty 1))
+;; => :max-loss-intrinsic 1000.0 :buying-power-effect 500.0 (Alpaca's cost basis)
+```
+
+Only that file depends on broker-model; the client itself still has zero
+external dependencies. Tests skip without broker-model.

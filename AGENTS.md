@@ -28,7 +28,14 @@ non-nil, else the live pair).
     `test/live/run-live-tests.sh`, which resolves those two env vars
     via David's credentials resolver and exports them only into its
     own Emacs subprocess.
-- Zero external Elisp dependencies. HTTP goes through the built-in
+- Zero external Elisp dependencies. The one exception is
+  `alpaca-broker-model.el`, which registers Alpaca's account rules
+  (margin, limited-margin, ira) with the sibling local-only package
+  `broker-model.el` (`../broker-model.el`): nothing else may require it,
+  CI does not byte-compile it, and `test/alpaca-broker-model-test.el`
+  skips when broker-model is not on the load path. Every rule cell cites
+  a capture in `docs/margin/` (URL + fetch date); mark values Alpaca
+  does not publish `unpublished`, never guess. HTTP goes through the built-in
   `url.el`, JSON is parsed with the built-in `json-parse-buffer`.
 - Order safety is gated, not absent: every function that places,
   replaces, or cancels an order, closes a position, or

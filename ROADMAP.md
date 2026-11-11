@@ -207,6 +207,12 @@ table from its output.
 
 - All streaming/WebSocket/SSE endpoints, including the Corporate Actions Events SSE feed — excluded per task scope.
 
+## Margin model (pure, no endpoint)
+
+| File | Mocked test | Notes |
+|---|---|---|
+| `alpaca-broker-model.el` | yes (`test/alpaca-broker-model-test.el`, skips without `../broker-model.el`) | registers Alpaca margin / limited-margin / ira with broker-model; vectors from the account object, maintenance table, concentration rule, universal spread rule; cross-broker test vs Schwab. Sources: `docs/margin/` |
+
 ## Totals
 
 - **91 / 91** in-scope endpoints implemented (48 Trading API + 43 Market Data API).
